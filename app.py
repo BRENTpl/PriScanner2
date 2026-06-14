@@ -18,6 +18,8 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 import streamlit as st
+import pandas as pd
+from st_aggrid import AgGrid, JsCode
 
 import pricemon_core as core
 from pricemon_core import (
@@ -397,105 +399,121 @@ if check_clicked:
 
 
 # ════════════════════════════════════════════════════════════════════════════
-#  Tabela produktów (statyczny HTML — wierne kolory/wyrównanie jak w desktopie)
+#  Tabela produktów — AgGrid: klik w wiersz zaznacza (bez checkboxa, miękki
+#  rerun), pełna kontrola kolorów komórek i szerokości kolumn. Bez „30 dni”.
 # ════════════════════════════════════════════════════════════════════════════
-# ════════════════════════════════════════════════════════════════════════════
-#  Tabela produktów (statyczny HTML — pełna kontrola kolorów, szerokości,
-#  i klikania całego wiersza). Kliknięcie wiersza ustawia ?sel=N -> wybór.
-# ════════════════════════════════════════════════════════════════════════════
-_TABLE_COLS = (("Produkt", "30%", "pm-name"), ("Cena", "10%", "pm-num"),
-               ("Baza", "10%", "pm-num"), ("Zmiana", "13%", "pm-num"),
-               ("Taniej", "10%", "pm-num"), ("Źródło", "9%", ""),
-               ("Dodano", "9%", ""), ("Sprawdzono", "9%", ""))
+_NUKE_GRID_CSS = {
+    ".ag-root-wrapper": {"border": "1px solid #1f1f1f", "border-radius": "3px"},
+    ".ag-header": {"background-color": "#444 !important", "border-bottom": "1px solid #202020"},
+    ".ag-header-cell-label": {"color": "#bdbdbd !important", "font-weight": "600"},
+    ".ag-row": {"font-size": "12.5px", "border-bottom": "1px solid #262626"},
+    ".ag-row-even": {"background-color": "#333333 !important"},
+    ".ag-row-odd": {"background-color": "#2e2e2e !important"},
+    ".ag-row-hover": {"background-color": "#3a4654 !important"},
+}
+
+# style komórek: kolor brany z ukrytych pól wiersza (cP/cC/cZ/cT)
+_JS_P = JsCode("function(p){return {color:p.data.cP,'line-height':'1.35'}}")
+_JS_C = JsCode("function(p){return {color:p.data.cC}}")
+_JS_Z = JsCode("function(p){return {color:p.data.cZ}}")
+_JS_T = JsCode("function(p){return {color:p.data.cT}}")
+_JS_N = JsCode("function(p){return {color:'#9a9a9a'}}")
+_JS_ROWSTYLE = JsCode(
+    "function(p){if(p.data&&p.data._sel){return {'background-color':'#463a24',"
+    "'box-shadow':'inset 3px 0 0 #b9742a'}}return null;}")
 
 
-def build_table_html(products, selected_url):
-    """Zwraca pełnoszerokościową tabelę HTML; każdy wiersz to link ?sel=N
-    (kliknięcie w dowolnym miejscu wiersza wybiera produkt). Bez kolumny „30 dni”."""
-    esc = _html.escape
-    cg = "".join(f"<col style='width:{w}'>" for _, w, _ in _TABLE_COLS)
-    th = "".join(f"<th class='{cls}'>{h}</th>" for h, _, cls in _TABLE_COLS)
-
-    def cell(content, n, cls="", color="", title=""):
-        sty = f" style='color:{color}'" if color else ""
-        tip = f" title='{esc(title)}'" if title else ""
-        return (f"<td class='{cls}'{sty}>"
-                f"<a class='pm-rowlink' href='?sel={n}'{tip}>{content}</a></td>")
-
+def build_grid_df(products, selected_url):
     rows = []
     for i, p in enumerate(products):
-        sel = " class='pm-row-sel'" if p.url == selected_url else ""
         base = p.name or domain(p.url) or p.url
         if p.status == "error":
-            name_txt, ncol = "⚠ " + base, CLR_ERROR
+            name, cP = "⚠ " + base, CLR_ERROR
         elif p.status in ("unavailable", "ended"):
-            name_txt, ncol = "⊘ " + base, CLR_UNAVAIL
+            name, cP = "⊘ " + base, CLR_UNAVAIL
         else:
-            name_txt, ncol = base, CLR_TEXT
-        star = "<span class='pm-fav'>★ </span>" if p.favorite else ""
-        name_html = star + esc(name_txt)
-        # Cena
+            name, cP = base, CLR_TEXT
+        if p.favorite:
+            name = "★ " + name
         if p.status == "ended":
-            price, pcol = "zakończona", CLR_UNAVAIL
+            price, cC = "zakończona", CLR_UNAVAIL
         elif p.status == "unavailable":
-            price, pcol = "niedostępny", CLR_UNAVAIL
+            price, cC = "niedostępny", CLR_UNAVAIL
         elif p.current_price is not None:
-            price, pcol = esc(fmt_money(p.current_price, p.currency)), CLR_TEXT
+            price, cC = fmt_money(p.current_price, p.currency), CLR_TEXT
         elif p.status == "fetching":
-            price, pcol = "…", CLR_TEXT
+            price, cC = "…", CLR_TEXT
         else:
-            price, pcol = "—", CLR_TEXT
+            price, cC = "—", CLR_TEXT
         if has_cheaper_alt(p):
-            price = f"<span style='color:{CLR_DOWN}'>▾</span> " + price
-            pcol = CLR_DOWN
-        # Baza / Zmiana / Taniej
-        base_disp = esc(fmt_money(p.initial_price, p.currency)) if p.initial_price is not None else "—"
+            price, cC = "▾ " + price, CLR_DOWN
+        base_disp = fmt_money(p.initial_price, p.currency) if p.initial_price is not None else "—"
         if p.status in ("unavailable", "ended"):
-            chg, ccol = "—", CLR_NEUTRAL
+            chg, cZ = "—", CLR_NEUTRAL
         else:
-            chg, ccol = esc(change_text(p)), CLR_NEUTRAL
+            chg, cZ = change_text(p), CLR_NEUTRAL
             if p.initial_price and p.current_price is not None:
                 diff = p.current_price - p.initial_price
-                ccol = CLR_UP if diff > 0.005 else CLR_DOWN if diff < -0.005 else CLR_NEUTRAL
+                cZ = CLR_UP if diff > 0.005 else CLR_DOWN if diff < -0.005 else CLR_NEUTRAL
         best = best_cheaper_alt(p)
-        best_disp = esc(fmt_money(best["converted"], p.currency)) if best else "—"
-        bcol = CLR_DOWN if best else CLR_NEUTRAL
+        best_disp = fmt_money(best["converted"], p.currency) if best else "—"
+        cT = CLR_DOWN if best else CLR_NEUTRAL
         checked = "sprawdzam…" if p.status == "fetching" else fmt_dt(p.last_checked)
-        tip = p.url + (("\n\n" + p.error) if p.error else "")
-
-        cells = (cell(name_html, i, "pm-name", ncol, tip)
-                 + cell(price, i, "pm-num", pcol)
-                 + cell(base_disp, i, "pm-num", CLR_NEUTRAL)
-                 + cell(chg, i, "pm-num", ccol)
-                 + cell(best_disp, i, "pm-num", bcol)
-                 + cell(esc(domain(p.url)), i, "", CLR_NEUTRAL)
-                 + cell(esc(fmt_dt(p.date_added)), i, "", CLR_NEUTRAL)
-                 + cell(esc(checked), i, "", CLR_NEUTRAL))
-        rows.append(f"<tr{sel}>{cells}</tr>")
-
-    body = "".join(rows) if rows else (
-        "<tr><td colspan='8' style='padding:18px;text-align:center;color:#8a8a8a'>"
-        "Lista jest pusta — dodaj pierwszy produkt powyżej.</td></tr>")
-    return (f"<table class='pm-table'><colgroup>{cg}</colgroup>"
-            f"<thead><tr>{th}</tr></thead><tbody>{body}</tbody></table>")
+        rows.append({"Produkt": name, "Cena": price, "Baza": base_disp,
+                     "Zmiana": chg, "Taniej": best_disp, "Źródło": domain(p.url),
+                     "Dodano": fmt_dt(p.date_added), "Sprawdzono": checked,
+                     "_idx": i, "cP": cP, "cC": cC, "cZ": cZ, "cT": cT,
+                     "_sel": (p.url == selected_url)})
+    cols = ["Produkt", "Cena", "Baza", "Zmiana", "Taniej", "Źródło", "Dodano",
+            "Sprawdzono", "_idx", "cP", "cC", "cZ", "cT", "_sel"]
+    return pd.DataFrame(rows, columns=cols)
 
 
-# odczyt kliknięcia w wiersz (?sel=N) — zużywamy parametr, by nie zwietrzał
-if "sel" in st.query_params:
-    try:
-        _i = int(st.query_params["sel"])
-        if 0 <= _i < len(st.session_state.products):
-            st.session_state.selected_url = st.session_state.products[_i].url
-    except (ValueError, TypeError):
-        pass
-    try:
-        del st.query_params["sel"]
-    except Exception:
-        pass
+def render_grid(products):
+    if not products:
+        st.markdown("<div class='pm-card' style='text-align:center;color:#8a8a8a'>"
+                    "Lista jest pusta — dodaj pierwszy produkt powyżej.</div>",
+                    unsafe_allow_html=True)
+        return
+    df = build_grid_df(products, st.session_state.get("selected_url"))
+    hidden = [{"field": f, "hide": True} for f in ("_idx", "cP", "cC", "cZ", "cT", "_sel")]
+    grid_options = {
+        "columnDefs": [
+            {"field": "Produkt", "flex": 2, "minWidth": 240, "cellStyle": _JS_P,
+             "wrapText": True, "autoHeight": True, "tooltipField": "Produkt"},
+            {"field": "Cena", "width": 105, "type": "rightAligned", "cellStyle": _JS_C},
+            {"field": "Baza", "width": 100, "type": "rightAligned", "cellStyle": _JS_N},
+            {"field": "Zmiana", "width": 135, "type": "rightAligned", "cellStyle": _JS_Z},
+            {"field": "Taniej", "width": 105, "type": "rightAligned", "cellStyle": _JS_T},
+            {"field": "Źródło", "width": 105, "cellStyle": _JS_N},
+            {"field": "Dodano", "width": 120, "cellStyle": _JS_N},
+            {"field": "Sprawdzono", "width": 120, "cellStyle": _JS_N},
+            *hidden,
+        ],
+        "rowSelection": "single",
+        "suppressRowClickSelection": False,
+        "suppressCellFocus": True,
+        "getRowStyle": _JS_ROWSTYLE,
+        "headerHeight": 36,
+    }
+    height = min(1200, 90 + 34 * len(products))
+    grid = AgGrid(
+        df, gridOptions=grid_options, height=height, theme="streamlit",
+        allow_unsafe_jscode=True, custom_css=_NUKE_GRID_CSS,
+        show_search=False, show_download_button=False, key="pm_grid")
 
-st.markdown(build_table_html(st.session_state.products,
-                             st.session_state.get("selected_url")),
-            unsafe_allow_html=True)
+    sel = grid.selected_rows
+    idx = None
+    if isinstance(sel, pd.DataFrame):
+        if not sel.empty:
+            idx = int(sel.iloc[0]["_idx"])
+    elif sel:
+        idx = int(sel[0]["_idx"])
+    if idx is not None and 0 <= idx < len(products):
+        st.session_state.selected_url = products[idx].url
+
+
+render_grid(st.session_state.products)
 
 st.markdown(f"<div class='pm-sub' style='margin-top:6px'>{_html.escape(st.session_state.status)}</div>",
             unsafe_allow_html=True)
