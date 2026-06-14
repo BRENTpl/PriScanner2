@@ -18,6 +18,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 import streamlit as st
+import pandas as pd
 
 import pricemon_core as core
 from pricemon_core import (
@@ -150,6 +151,13 @@ def normalize_url(raw):
     return url
 
 
+def set_table_selection(idx):
+    """Programowo ustawia zaznaczony wiersz tabeli — utrzymuje spójność
+    podświetlenia po dodaniu/usunięciu/przesunięciu/imporcie."""
+    rows = [idx] if idx is not None else []
+    st.session_state["pm_table"] = {"selection": {"rows": rows, "columns": []}}
+
+
 # ── stan sesji ───────────────────────────────────────────────────────────────
 if "products" not in st.session_state:
     prods, interval = load_products()
@@ -159,6 +167,7 @@ if "products" not in st.session_state:
                                else "Wklej link do produktu i naciśnij «Dodaj».")
     st.session_state.selected_url = prods[0].url if prods else None
     st.session_state.do_compare = True
+    set_table_selection(0 if prods else None)
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -314,7 +323,7 @@ with c1:
                            placeholder="Wklej link do produktu…",
                            label_visibility="collapsed")
 with c2:
-    add_clicked = st.button("Dodaj", type="primary", use_container_width=True)
+    add_clicked = st.button("Dodaj", type="primary", width='stretch')
 with c3:
     interval = st.number_input("Co [h]", min_value=1, max_value=168,
                                value=int(st.session_state.interval_hours),
@@ -323,7 +332,7 @@ with c3:
         st.session_state.interval_hours = int(interval)
         save_products()
 with c4:
-    check_clicked = st.button("Sprawdź wszystko", use_container_width=True)
+    check_clicked = st.button("Sprawdź wszystko", width='stretch')
 with c5:
     st.session_state.do_compare = st.checkbox("Porównuj Amazon UE",
                                               value=st.session_state.do_compare,
@@ -340,11 +349,13 @@ if add_clicked:
         if existing:
             st.session_state.status = "Ten produkt już jest na liście."
             st.session_state.selected_url = nurl
+            set_table_selection(idx)
         else:
             p = Product(url=nurl, name=domain(nurl), date_added=now_iso(),
                         status="fetching")
             st.session_state.products.append(p)
             st.session_state.selected_url = nurl
+            set_table_selection(len(st.session_state.products) - 1)
             with st.spinner(f"Pobieram: {domain(nurl)}…"):
                 res = _fetch_one(nurl)
                 if res.get("price") is None and not res.get("unavailable") \
@@ -376,81 +387,89 @@ if check_clicked:
 # ════════════════════════════════════════════════════════════════════════════
 #  Tabela produktów (statyczny HTML — wierne kolory/wyrównanie jak w desktopie)
 # ════════════════════════════════════════════════════════════════════════════
-def _cell_color(style):
-    return f" style='color:{style}'" if style else ""
+def render_product_table(products):
+    """Klikalna tabela (st.dataframe) z kolorami komórek. Zwraca pozycyjny
+    indeks zaznaczonego wiersza lub None. Bez kolumny „30 dni” (jest w szczegółach)."""
+    if not products:
+        st.markdown("<div class='pm-card' style='text-align:center;color:#8a8a8a'>"
+                    "Lista jest pusta — dodaj pierwszy produkt powyżej.</div>",
+                    unsafe_allow_html=True)
+        return None
 
-
-def build_table_html(products, selected_url):
-    head = ("Produkt", "Cena", "Baza", "Zmiana", "Taniej", "30 dni",
-            "Źródło", "Dodano", "Sprawdzono")
-    th = "".join(f"<th>{h}</th>" for h in head)
-    rows = []
+    rows, cell_css = [], []
     for p in products:
-        sel = " class='pm-row-sel'" if p.url == selected_url else ""
-        esc = _html.escape
-        # Produkt
         base = p.name or domain(p.url) or p.url
         if p.status == "error":
-            name_disp = "⚠ " + base; ncol = CLR_ERROR
+            name, ncol = "⚠ " + base, CLR_ERROR
         elif p.status in ("unavailable", "ended"):
-            name_disp = "⊘ " + base; ncol = CLR_UNAVAIL
+            name, ncol = "⊘ " + base, CLR_UNAVAIL
         else:
-            name_disp = base; ncol = ""
-        star = "<span class='pm-fav'>★ </span>" if p.favorite else ""
-        title = esc(p.url + (("\n\n" + p.error) if p.error else ""))
-        name_cell = (f"<td class='pm-name'{_cell_color(ncol)} title='{title}'>"
-                     f"{star}{esc(name_disp)}</td>")
+            name, ncol = base, CLR_TEXT
+        if p.favorite:
+            name = "★ " + name
         # Cena
         if p.status == "ended":
-            price_disp, pcol = "zakończona", CLR_UNAVAIL
+            price, pcol = "zakończona", CLR_UNAVAIL
         elif p.status == "unavailable":
-            price_disp, pcol = "niedostępny", CLR_UNAVAIL
+            price, pcol = "niedostępny", CLR_UNAVAIL
         elif p.current_price is not None:
-            price_disp, pcol = fmt_money(p.current_price, p.currency), ""
+            price, pcol = fmt_money(p.current_price, p.currency), CLR_TEXT
         elif p.status == "fetching":
-            price_disp, pcol = "…", ""
+            price, pcol = "…", CLR_TEXT
         else:
-            price_disp, pcol = "—", ""
+            price, pcol = "—", CLR_TEXT
         if has_cheaper_alt(p):
-            price_disp = f"<span style='color:{CLR_DOWN}'>▾</span> " + price_disp
-        price_cell = f"<td class='pm-num'{_cell_color(pcol)}>{price_disp}</td>"
-        # Baza
+            price, pcol = "▾ " + price, CLR_DOWN
+        # Baza / Zmiana / Taniej
         base_disp = fmt_money(p.initial_price, p.currency) if p.initial_price is not None else "—"
-        base_cell = f"<td class='pm-num' style='color:{CLR_NEUTRAL}'>{base_disp}</td>"
-        # Zmiana
         if p.status in ("unavailable", "ended"):
             chg, ccol = "—", CLR_NEUTRAL
         else:
-            chg = change_text(p)
-            ccol = CLR_NEUTRAL
+            chg, ccol = change_text(p), CLR_NEUTRAL
             if p.initial_price and p.current_price is not None:
                 diff = p.current_price - p.initial_price
                 ccol = CLR_UP if diff > 0.005 else CLR_DOWN if diff < -0.005 else CLR_NEUTRAL
-        chg_cell = f"<td class='pm-num'{_cell_color(ccol)}>{esc(chg)}</td>"
-        # Taniej
         best = best_cheaper_alt(p)
         best_disp = fmt_money(best["converted"], p.currency) if best else "—"
-        best_cell = f"<td class='pm-num' style='color:{CLR_DOWN if best else CLR_NEUTRAL}'>{best_disp}</td>"
-        # 30 dni (Omnibus)
-        omni = fmt_money(p.omnibus_price, p.currency) if p.omnibus_price is not None else "—"
-        omni_cell = f"<td class='pm-num'>{omni}</td>"
-        # Źródło / Dodano / Sprawdzono
-        src_cell = f"<td style='color:{CLR_NEUTRAL}'>{esc(domain(p.url))}</td>"
-        added_cell = f"<td style='color:{CLR_NEUTRAL}'>{esc(fmt_dt(p.date_added))}</td>"
+        bcol = CLR_DOWN if best else CLR_NEUTRAL
         checked = "sprawdzam…" if p.status == "fetching" else fmt_dt(p.last_checked)
-        checked_cell = f"<td style='color:{CLR_NEUTRAL}'>{esc(checked)}</td>"
 
-        rows.append(f"<tr{sel}>{name_cell}{price_cell}{base_cell}{chg_cell}"
-                    f"{best_cell}{omni_cell}{src_cell}{added_cell}{checked_cell}</tr>")
-    body = "".join(rows) if rows else (
-        "<tr><td colspan='9' style='color:#8a8a8a;padding:18px;text-align:center'>"
-        "Lista jest pusta — dodaj pierwszy produkt powyżej.</td></tr>")
-    return f"<table class='pm-table'><thead><tr>{th}</tr></thead><tbody>{body}</tbody></table>"
+        rows.append({"Produkt": name, "Cena": price, "Baza": base_disp,
+                     "Zmiana": chg, "Taniej": best_disp, "Źródło": domain(p.url),
+                     "Dodano": fmt_dt(p.date_added), "Sprawdzono": checked})
+        cell_css.append({"Produkt": f"color:{ncol}", "Cena": f"color:{pcol}",
+                         "Baza": f"color:{CLR_NEUTRAL}", "Zmiana": f"color:{ccol}",
+                         "Taniej": f"color:{bcol}", "Źródło": f"color:{CLR_NEUTRAL}",
+                         "Dodano": f"color:{CLR_NEUTRAL}", "Sprawdzono": f"color:{CLR_NEUTRAL}"})
+
+    df = pd.DataFrame(rows)
+
+    def _style(row):
+        return [cell_css[row.name].get(c, "") for c in df.columns]
+
+    styler = df.style.apply(_style, axis=1)
+    num = dict(width="small", alignment="right")
+    colcfg = {
+        "Produkt": st.column_config.TextColumn("Produkt", width=160),
+        "Cena": st.column_config.TextColumn("Cena", **num),
+        "Baza": st.column_config.TextColumn("Baza", **num),
+        "Zmiana": st.column_config.TextColumn("Zmiana", **num),
+        "Taniej": st.column_config.TextColumn("Taniej", **num),
+        "Źródło": st.column_config.TextColumn("Źródło", width="small"),
+        "Dodano": st.column_config.TextColumn("Dodano", width="small"),
+        "Sprawdzono": st.column_config.TextColumn("Sprawdzono", width="small"),
+    }
+    event = st.dataframe(
+        styler, hide_index=True, width='stretch', key="pm_table",
+        on_select="rerun", selection_mode="single-row", column_config=colcfg,
+        height=min(460, 44 + 36 * len(products)))
+    sel = event.selection.rows if (event and event.selection) else []
+    return sel[0] if sel else None
 
 
-st.markdown(build_table_html(st.session_state.products,
-                             st.session_state.get("selected_url")),
-            unsafe_allow_html=True)
+sel_idx = render_product_table(st.session_state.products)
+if sel_idx is not None and 0 <= sel_idx < len(st.session_state.products):
+    st.session_state.selected_url = st.session_state.products[sel_idx].url
 
 st.markdown(f"<div class='pm-sub' style='margin-top:6px'>{_html.escape(st.session_state.status)}</div>",
             unsafe_allow_html=True)
@@ -462,24 +481,13 @@ st.markdown(f"<div class='pm-sub' style='margin-top:6px'>{_html.escape(st.sessio
 st.divider()
 
 if st.session_state.products:
-    labels = []
-    url_by_label = {}
-    for i, p in enumerate(st.session_state.products):
-        nm = p.name or domain(p.url)
-        tag = {"error": " ⚠", "unavailable": " ⊘", "ended": " ⊘"}.get(p.status, "")
-        star = "★ " if p.favorite else ""
-        lbl = f"{i+1}. {star}{nm[:70]}{tag}"
-        labels.append(lbl)
-        url_by_label[lbl] = p.url
-
     cur_url = st.session_state.get("selected_url")
-    cur_idx = next((i for i, p in enumerate(st.session_state.products)
-                    if p.url == cur_url), 0)
-    sel_label = st.selectbox("Pozycja (szczegóły i akcje)", labels,
-                             index=min(cur_idx, len(labels) - 1))
-    sel_url = url_by_label[sel_label]
-    st.session_state.selected_url = sel_url
-    ridx, p = find_product(sel_url)
+    ridx, p = find_product(cur_url)
+    if p is None:
+        ridx, p = 0, st.session_state.products[0]
+        st.session_state.selected_url = p.url
+
+    st.caption("Szczegóły wybranego produktu — kliknij wiersz w tabeli powyżej, aby zmienić.")
 
     if p:
         left, right = st.columns([1.4, 1])
@@ -519,13 +527,13 @@ if st.session_state.products:
 
             b1, b2 = st.columns(2)
             with b1:
-                if st.button("🔄 Sprawdź ponownie", use_container_width=True, key="b_check"):
+                if st.button("🔄 Sprawdź ponownie", width='stretch', key="b_check"):
                     with st.spinner("Sprawdzam…"):
                         check_urls([p.url])
                     st.session_state.status = f"Sprawdzono: {p.name or domain(p.url)}"
                     st.rerun()
             with b2:
-                if st.button("🌐 Renderuj (Playwright)", use_container_width=True,
+                if st.button("🌐 Renderuj (Playwright)", width='stretch',
                              key="b_headed", help="Wymusza render przeglądarką "
                              "(jeśli dostępna). Pomaga przy stronach z ceną w JS."):
                     with st.spinner("Renderuję…"):
@@ -539,13 +547,13 @@ if st.session_state.products:
                                  key=f"base_{p.url}")
             bb1, bb2 = st.columns(2)
             with bb1:
-                if st.button("Ustaw bazę", use_container_width=True, key="b_setbase"):
+                if st.button("Ustaw bazę", width='stretch', key="b_setbase"):
                     if nb > 0:
                         p.initial_price = nb; save_products()
                         st.session_state.status = "Zaktualizowano cenę bazową."
                         st.rerun()
             with bb2:
-                if st.button("Zeruj do bieżącej", use_container_width=True, key="b_resetbase",
+                if st.button("Zeruj do bieżącej", width='stretch', key="b_resetbase",
                              disabled=p.current_price is None):
                     p.initial_price = p.current_price; save_products()
                     st.session_state.status = "Cena bazowa = bieżąca."
@@ -554,17 +562,17 @@ if st.session_state.products:
             t1, t2 = st.columns(2)
             with t1:
                 fav_label = "☆ Usuń z ulubionych" if p.favorite else "★ Do ulubionych"
-                if st.button(fav_label, use_container_width=True, key="b_fav"):
+                if st.button(fav_label, width='stretch', key="b_fav"):
                     p.favorite = not p.favorite; save_products(); st.rerun()
             with t2:
                 if p.status == "ended":
-                    if st.button("▶ Wznów monitorowanie", use_container_width=True, key="b_resume"):
+                    if st.button("▶ Wznów monitorowanie", width='stretch', key="b_resume"):
                         p.status = "new"; p.error = ""; save_products()
                         with st.spinner("Sprawdzam…"):
                             check_urls([p.url])
                         st.rerun()
                 else:
-                    if st.button("⊘ Oznacz zakończoną", use_container_width=True, key="b_end"):
+                    if st.button("⊘ Oznacz zakończoną", width='stretch', key="b_end"):
                         p.status = "ended"; p.error = "Sprzedaż zakończona — oznaczono ręcznie"
                         p.current_price = None; p.last_checked = now_iso()
                         save_products(); st.rerun()
@@ -572,21 +580,23 @@ if st.session_state.products:
             # zmiana kolejności (odpowiednik przeciągania wierszy)
             m1, m2 = st.columns(2)
             with m1:
-                if st.button("↑ W górę", use_container_width=True, key="b_up",
+                if st.button("↑ W górę", width='stretch', key="b_up",
                              disabled=ridx == 0):
                     ps = st.session_state.products
                     ps[ridx-1], ps[ridx] = ps[ridx], ps[ridx-1]
+                    set_table_selection(ridx - 1)
                     save_products(); st.rerun()
             with m2:
-                if st.button("↓ W dół", use_container_width=True, key="b_down",
+                if st.button("↓ W dół", width='stretch', key="b_down",
                              disabled=ridx >= len(st.session_state.products)-1):
                     ps = st.session_state.products
                     ps[ridx+1], ps[ridx] = ps[ridx], ps[ridx+1]
+                    set_table_selection(ridx + 1)
                     save_products(); st.rerun()
 
             # Ceneo + porównywarki
             if p.name and "ceneo." not in (urlparse(p.url).netloc or "").lower():
-                if st.button("🔍 Utwórz monitorowanie Ceneo", use_container_width=True,
+                if st.button("🔍 Utwórz monitorowanie Ceneo", width='stretch',
                              key="b_ceneo"):
                     with st.spinner(f"Szukam na Ceneo: {clean_query(p.name)}…"):
                         ref = p.current_price if p.current_price is not None else p.initial_price
@@ -596,11 +606,13 @@ if st.session_state.products:
                         if exist:
                             st.session_state.status = "Ten produkt Ceneo jest już na liście."
                             st.session_state.selected_url = curl
+                            set_table_selection(idx2)
                         else:
                             np = Product(url=curl, name=domain(curl),
                                          date_added=now_iso(), status="fetching")
                             st.session_state.products.insert(ridx + 1, np)
                             st.session_state.selected_url = curl
+                            set_table_selection(ridx + 1)
                             save_products()
                             with st.spinner("Pobieram cenę z Ceneo…"):
                                 check_urls([curl])
@@ -629,11 +641,12 @@ if st.session_state.products:
             st.markdown("<div class='pm-sub'>Kopiuj link:</div>", unsafe_allow_html=True)
             st.code(p.url, language=None)
 
-            if st.button("🗑 Usuń z listy", use_container_width=True, key="b_del"):
+            if st.button("🗑 Usuń z listy", width='stretch', key="b_del"):
                 name = p.name or domain(p.url)
                 st.session_state.products.pop(ridx)
                 st.session_state.selected_url = (
                     st.session_state.products[0].url if st.session_state.products else None)
+                set_table_selection(0 if st.session_state.products else None)
                 save_products()
                 st.session_state.status = f"Usunięto: {name}"
                 st.rerun()
@@ -656,7 +669,7 @@ with st.expander("Import / eksport listy (JSON — zgodny z wersją desktopową)
             "⬇ Pobierz listę (.json)",
             data=json.dumps(export_payload, ensure_ascii=False, indent=2),
             file_name=f"pricemon-export-{datetime.now():%Y%m%d}.json",
-            mime="application/json", use_container_width=True,
+            mime="application/json", width='stretch',
             disabled=not st.session_state.products)
     with ie2:
         st.markdown("**Import**")
@@ -689,6 +702,7 @@ with st.expander("Import / eksport listy (JSON — zgodny z wersją desktopową)
             elif mode.startswith("Zastąp"):
                 st.session_state.products = parsed
                 st.session_state.selected_url = parsed[0].url
+                set_table_selection(0)
                 save_products()
                 st.session_state.status = f"Zastąpiono listę — {len(parsed)} pozycji."
             else:
