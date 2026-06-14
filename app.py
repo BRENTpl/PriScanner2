@@ -418,11 +418,10 @@ _JS_C = JsCode("function(p){return {color:p.data.cC}}")
 _JS_Z = JsCode("function(p){return {color:p.data.cZ}}")
 _JS_T = JsCode("function(p){return {color:p.data.cT}}")
 _JS_N = JsCode("function(p){return {color:'#9a9a9a'}}")
-# cena: domyślny kolor; zielona ★ tylko jako znacznik „taniej na innym Amazonie”
-_JS_PRICE = JsCode(
-    "function(p){var v=(p.value==null?'':p.value);"
-    "return p.data&&p.data._cheap?"
-    "'<span style=\"color:#5fb56f\">\u2605</span> '+v:v;}")
+# zielona ★ jako znacznik „taniej na innym Amazonie” (osobna wąska kolumna,
+# czysty tekst + kolor — bez HTML, który ag-grid-react i tak escapuje)
+_JS_STAR = JsCode("function(p){return {color:'#5fb56f','padding-left':'4px',"
+                  "'padding-right':'0px'}}")
 _JS_ROWSTYLE = JsCode(
     "function(p){if(p.data&&p.data._sel){return {'background-color':'#463a24',"
     "'box-shadow':'inset 3px 0 0 #b9742a'}}return null;}")
@@ -462,13 +461,14 @@ def build_grid_df(products, selected_url):
         best_disp = fmt_money(best["converted"], p.currency) if best else "—"
         cT = CLR_DOWN if best else CLR_NEUTRAL
         checked = "sprawdzam…" if p.status == "fetching" else fmt_dt(p.last_checked)
-        rows.append({"Produkt": name, "Cena": price, "Baza": base_disp,
+        rows.append({"Produkt": name, "★": ("★" if has_cheaper_alt(p) else ""),
+                     "Cena": price, "Baza": base_disp,
                      "Zmiana": chg, "Taniej": best_disp, "Źródło": domain(p.url),
                      "Dodano": fmt_dt(p.date_added), "Sprawdzono": checked,
                      "_idx": i, "cP": cP, "cC": cC, "cZ": cZ, "cT": cT,
-                     "_cheap": has_cheaper_alt(p), "_sel": (p.url == selected_url)})
-    cols = ["Produkt", "Cena", "Baza", "Zmiana", "Taniej", "Źródło", "Dodano",
-            "Sprawdzono", "_idx", "cP", "cC", "cZ", "cT", "_cheap", "_sel"]
+                     "_sel": (p.url == selected_url)})
+    cols = ["Produkt", "★", "Cena", "Baza", "Zmiana", "Taniej", "Źródło", "Dodano",
+            "Sprawdzono", "_idx", "cP", "cC", "cZ", "cT", "_sel"]
     return pd.DataFrame(rows, columns=cols)
 
 
@@ -479,13 +479,15 @@ def render_grid(products):
                     unsafe_allow_html=True)
         return
     df = build_grid_df(products, st.session_state.get("selected_url"))
-    hidden = [{"field": f, "hide": True} for f in ("_idx", "cP", "cC", "cZ", "cT", "_cheap", "_sel")]
+    hidden = [{"field": f, "hide": True} for f in ("_idx", "cP", "cC", "cZ", "cT", "_sel")]
     grid_options = {
         "columnDefs": [
             {"field": "Produkt", "flex": 2, "minWidth": 240, "cellStyle": _JS_P,
              "wrapText": True, "autoHeight": True, "tooltipField": "Produkt"},
-            {"field": "Cena", "width": 105, "type": "rightAligned", "cellStyle": _JS_C,
-             "cellRenderer": _JS_PRICE},
+            {"field": "★", "headerName": "", "width": 30, "type": "rightAligned",
+             "cellStyle": _JS_STAR, "sortable": False, "resizable": False,
+             "suppressMovable": True},
+            {"field": "Cena", "width": 100, "type": "rightAligned", "cellStyle": _JS_C},
             {"field": "Baza", "width": 100, "type": "rightAligned", "cellStyle": _JS_N},
             {"field": "Zmiana", "width": 135, "type": "rightAligned", "cellStyle": _JS_Z},
             {"field": "Taniej", "width": 105, "type": "rightAligned", "cellStyle": _JS_T},
