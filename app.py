@@ -516,7 +516,10 @@ def render_grid(products):
     elif sel:
         idx = int(sel[0]["_idx"])
     if idx is not None and 0 <= idx < len(products):
-        st.session_state.selected_url = products[idx].url
+        new_url = products[idx].url
+        if new_url != st.session_state.get("selected_url"):
+            st.session_state.selected_url = new_url
+            st.rerun()   # przerysuj tabelę z aktualnym podświetleniem
 
 
 render_grid(st.session_state.products)
