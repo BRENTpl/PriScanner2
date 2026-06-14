@@ -18,7 +18,6 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 import streamlit as st
-import pandas as pd
 
 import pricemon_core as core
 from pricemon_core import (
@@ -45,7 +44,8 @@ st.markdown("""
     background: #383838; color: #cfcfcf;
 }
 [data-testid="stHeader"] { background: #333333; border-bottom: 1px solid #1f1f1f; }
-.block-container { padding-top: 1.2rem; padding-bottom: 2rem; max-width: 1500px; }
+.block-container { padding-top: 1.2rem; padding-bottom: 2rem; max-width: 100%;
+    padding-left: 2.5rem; padding-right: 2.5rem; }
 * { font-family: 'Helvetica Neue','Segoe UI',Arial,sans-serif; }
 
 h1,h2,h3,h4 { color: #e6e6e6 !important; letter-spacing: .5px; }
@@ -73,19 +73,26 @@ label, .stMarkdown p { color: #cfcfcf; }
 }
 .stButton > button[kind="primary"]:hover { background: #cf8531; color:#1c130a; }
 
-/* tabela produktów */
+/* tabela produktów — pełna szerokość, stałe proporcje kolumn */
 .pm-table { width: 100%; border-collapse: collapse; border: 1px solid #1f1f1f;
-    border-radius: 3px; overflow: hidden; font-size: 12.5px; }
-.pm-table th { background: #444444; color: #bdbdbd; padding: 7px 9px; text-align: left;
-    border-right: 1px solid #2a2a2a; border-bottom: 1px solid #202020; font-weight: 600; white-space: nowrap; }
-.pm-table td { padding: 6px 9px; border-bottom: 1px solid #262626; color: #cfcfcf; white-space: nowrap; }
+    border-radius: 3px; overflow: hidden; font-size: 12.5px; table-layout: fixed; }
+.pm-table th { background: #444444; color: #bdbdbd; padding: 8px 10px; text-align: left;
+    border-right: 1px solid #2a2a2a; border-bottom: 1px solid #202020; font-weight: 600;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pm-table th.pm-num { text-align: right; }
+.pm-table td { border-bottom: 1px solid #262626; padding: 0; vertical-align: middle; }
 .pm-table tr:nth-child(even) td { background: #333333; }
 .pm-table tr:nth-child(odd) td  { background: #2e2e2e; }
 .pm-table tr:hover td { background: #3a4654; }
-.pm-num { text-align: right; font-variant-numeric: tabular-nums; }
-.pm-name { white-space: normal; min-width: 280px; }
+/* cały wiersz klikalny: link wypełnia komórkę */
+.pm-rowlink { display: block; padding: 7px 10px; color: inherit; text-decoration: none;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer; }
+.pm-rowlink:hover, .pm-rowlink:focus { color: inherit; text-decoration: none; }
+.pm-num .pm-rowlink { text-align: right; font-variant-numeric: tabular-nums; }
+.pm-name .pm-rowlink { white-space: normal; word-break: break-word; }
 .pm-fav { color: #d9a441; }
-.pm-row-sel td { box-shadow: inset 3px 0 0 #b9742a; }
+.pm-row-sel td { background: #463a24 !important; box-shadow: inset 3px 0 0 #b9742a; }
+.pm-row-sel:hover td { background: #50421f !important; }
 
 /* karty szczegółów (odpowiednik kafelków hover) */
 .pm-card { background: #2b2b2b; border: 1px solid #1f1f1f; border-radius: 3px;
@@ -152,10 +159,15 @@ def normalize_url(raw):
 
 
 def set_table_selection(idx):
-    """Programowo ustawia zaznaczony wiersz tabeli — utrzymuje spójność
-    podświetlenia po dodaniu/usunięciu/przesunięciu/imporcie."""
-    rows = [idx] if idx is not None else []
-    st.session_state["pm_table"] = {"selection": {"rows": rows, "columns": []}}
+    """Ustawia wybrany produkt po indeksie — utrzymuje spójność wyboru po
+    dodaniu/usunięciu/przesunięciu/imporcie."""
+    prods = st.session_state.get("products", [])
+    if idx is not None and 0 <= idx < len(prods):
+        st.session_state.selected_url = prods[idx].url
+    elif prods:
+        st.session_state.selected_url = prods[0].url
+    else:
+        st.session_state.selected_url = None
 
 
 # ── stan sesji ───────────────────────────────────────────────────────────────
@@ -387,89 +399,103 @@ if check_clicked:
 # ════════════════════════════════════════════════════════════════════════════
 #  Tabela produktów (statyczny HTML — wierne kolory/wyrównanie jak w desktopie)
 # ════════════════════════════════════════════════════════════════════════════
-def render_product_table(products):
-    """Klikalna tabela (st.dataframe) z kolorami komórek. Zwraca pozycyjny
-    indeks zaznaczonego wiersza lub None. Bez kolumny „30 dni” (jest w szczegółach)."""
-    if not products:
-        st.markdown("<div class='pm-card' style='text-align:center;color:#8a8a8a'>"
-                    "Lista jest pusta — dodaj pierwszy produkt powyżej.</div>",
-                    unsafe_allow_html=True)
-        return None
+# ════════════════════════════════════════════════════════════════════════════
+#  Tabela produktów (statyczny HTML — pełna kontrola kolorów, szerokości,
+#  i klikania całego wiersza). Kliknięcie wiersza ustawia ?sel=N -> wybór.
+# ════════════════════════════════════════════════════════════════════════════
+_TABLE_COLS = (("Produkt", "30%", "pm-name"), ("Cena", "10%", "pm-num"),
+               ("Baza", "10%", "pm-num"), ("Zmiana", "13%", "pm-num"),
+               ("Taniej", "10%", "pm-num"), ("Źródło", "9%", ""),
+               ("Dodano", "9%", ""), ("Sprawdzono", "9%", ""))
 
-    rows, cell_css = [], []
-    for p in products:
+
+def build_table_html(products, selected_url):
+    """Zwraca pełnoszerokościową tabelę HTML; każdy wiersz to link ?sel=N
+    (kliknięcie w dowolnym miejscu wiersza wybiera produkt). Bez kolumny „30 dni”."""
+    esc = _html.escape
+    cg = "".join(f"<col style='width:{w}'>" for _, w, _ in _TABLE_COLS)
+    th = "".join(f"<th class='{cls}'>{h}</th>" for h, _, cls in _TABLE_COLS)
+
+    def cell(content, n, cls="", color="", title=""):
+        sty = f" style='color:{color}'" if color else ""
+        tip = f" title='{esc(title)}'" if title else ""
+        return (f"<td class='{cls}'{sty}>"
+                f"<a class='pm-rowlink' href='?sel={n}'{tip}>{content}</a></td>")
+
+    rows = []
+    for i, p in enumerate(products):
+        sel = " class='pm-row-sel'" if p.url == selected_url else ""
         base = p.name or domain(p.url) or p.url
         if p.status == "error":
-            name, ncol = "⚠ " + base, CLR_ERROR
+            name_txt, ncol = "⚠ " + base, CLR_ERROR
         elif p.status in ("unavailable", "ended"):
-            name, ncol = "⊘ " + base, CLR_UNAVAIL
+            name_txt, ncol = "⊘ " + base, CLR_UNAVAIL
         else:
-            name, ncol = base, CLR_TEXT
-        if p.favorite:
-            name = "★ " + name
+            name_txt, ncol = base, CLR_TEXT
+        star = "<span class='pm-fav'>★ </span>" if p.favorite else ""
+        name_html = star + esc(name_txt)
         # Cena
         if p.status == "ended":
             price, pcol = "zakończona", CLR_UNAVAIL
         elif p.status == "unavailable":
             price, pcol = "niedostępny", CLR_UNAVAIL
         elif p.current_price is not None:
-            price, pcol = fmt_money(p.current_price, p.currency), CLR_TEXT
+            price, pcol = esc(fmt_money(p.current_price, p.currency)), CLR_TEXT
         elif p.status == "fetching":
             price, pcol = "…", CLR_TEXT
         else:
             price, pcol = "—", CLR_TEXT
         if has_cheaper_alt(p):
-            price, pcol = "▾ " + price, CLR_DOWN
+            price = f"<span style='color:{CLR_DOWN}'>▾</span> " + price
+            pcol = CLR_DOWN
         # Baza / Zmiana / Taniej
-        base_disp = fmt_money(p.initial_price, p.currency) if p.initial_price is not None else "—"
+        base_disp = esc(fmt_money(p.initial_price, p.currency)) if p.initial_price is not None else "—"
         if p.status in ("unavailable", "ended"):
             chg, ccol = "—", CLR_NEUTRAL
         else:
-            chg, ccol = change_text(p), CLR_NEUTRAL
+            chg, ccol = esc(change_text(p)), CLR_NEUTRAL
             if p.initial_price and p.current_price is not None:
                 diff = p.current_price - p.initial_price
                 ccol = CLR_UP if diff > 0.005 else CLR_DOWN if diff < -0.005 else CLR_NEUTRAL
         best = best_cheaper_alt(p)
-        best_disp = fmt_money(best["converted"], p.currency) if best else "—"
+        best_disp = esc(fmt_money(best["converted"], p.currency)) if best else "—"
         bcol = CLR_DOWN if best else CLR_NEUTRAL
         checked = "sprawdzam…" if p.status == "fetching" else fmt_dt(p.last_checked)
+        tip = p.url + (("\n\n" + p.error) if p.error else "")
 
-        rows.append({"Produkt": name, "Cena": price, "Baza": base_disp,
-                     "Zmiana": chg, "Taniej": best_disp, "Źródło": domain(p.url),
-                     "Dodano": fmt_dt(p.date_added), "Sprawdzono": checked})
-        cell_css.append({"Produkt": f"color:{ncol}", "Cena": f"color:{pcol}",
-                         "Baza": f"color:{CLR_NEUTRAL}", "Zmiana": f"color:{ccol}",
-                         "Taniej": f"color:{bcol}", "Źródło": f"color:{CLR_NEUTRAL}",
-                         "Dodano": f"color:{CLR_NEUTRAL}", "Sprawdzono": f"color:{CLR_NEUTRAL}"})
+        cells = (cell(name_html, i, "pm-name", ncol, tip)
+                 + cell(price, i, "pm-num", pcol)
+                 + cell(base_disp, i, "pm-num", CLR_NEUTRAL)
+                 + cell(chg, i, "pm-num", ccol)
+                 + cell(best_disp, i, "pm-num", bcol)
+                 + cell(esc(domain(p.url)), i, "", CLR_NEUTRAL)
+                 + cell(esc(fmt_dt(p.date_added)), i, "", CLR_NEUTRAL)
+                 + cell(esc(checked), i, "", CLR_NEUTRAL))
+        rows.append(f"<tr{sel}>{cells}</tr>")
 
-    df = pd.DataFrame(rows)
-
-    def _style(row):
-        return [cell_css[row.name].get(c, "") for c in df.columns]
-
-    styler = df.style.apply(_style, axis=1)
-    num = dict(width="small", alignment="right")
-    colcfg = {
-        "Produkt": st.column_config.TextColumn("Produkt", width=160),
-        "Cena": st.column_config.TextColumn("Cena", **num),
-        "Baza": st.column_config.TextColumn("Baza", **num),
-        "Zmiana": st.column_config.TextColumn("Zmiana", **num),
-        "Taniej": st.column_config.TextColumn("Taniej", **num),
-        "Źródło": st.column_config.TextColumn("Źródło", width="small"),
-        "Dodano": st.column_config.TextColumn("Dodano", width="small"),
-        "Sprawdzono": st.column_config.TextColumn("Sprawdzono", width="small"),
-    }
-    event = st.dataframe(
-        styler, hide_index=True, width='stretch', key="pm_table",
-        on_select="rerun", selection_mode="single-row", column_config=colcfg,
-        height=min(460, 44 + 36 * len(products)))
-    sel = event.selection.rows if (event and event.selection) else []
-    return sel[0] if sel else None
+    body = "".join(rows) if rows else (
+        "<tr><td colspan='8' style='padding:18px;text-align:center;color:#8a8a8a'>"
+        "Lista jest pusta — dodaj pierwszy produkt powyżej.</td></tr>")
+    return (f"<table class='pm-table'><colgroup>{cg}</colgroup>"
+            f"<thead><tr>{th}</tr></thead><tbody>{body}</tbody></table>")
 
 
-sel_idx = render_product_table(st.session_state.products)
-if sel_idx is not None and 0 <= sel_idx < len(st.session_state.products):
-    st.session_state.selected_url = st.session_state.products[sel_idx].url
+# odczyt kliknięcia w wiersz (?sel=N) — zużywamy parametr, by nie zwietrzał
+if "sel" in st.query_params:
+    try:
+        _i = int(st.query_params["sel"])
+        if 0 <= _i < len(st.session_state.products):
+            st.session_state.selected_url = st.session_state.products[_i].url
+    except (ValueError, TypeError):
+        pass
+    try:
+        del st.query_params["sel"]
+    except Exception:
+        pass
+
+st.markdown(build_table_html(st.session_state.products,
+                             st.session_state.get("selected_url")),
+            unsafe_allow_html=True)
 
 st.markdown(f"<div class='pm-sub' style='margin-top:6px'>{_html.escape(st.session_state.status)}</div>",
             unsafe_allow_html=True)
